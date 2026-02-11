@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 
-from models import CleanupCategory, CleanupItem, ScanResult, RiskLevel, ItemType, _format_size
+from models import CleanupCategory, CleanupItem, ScanResult, RiskLevel, ItemType, _format_size, _format_duration
 
 console = Console()
 
@@ -325,14 +325,20 @@ def show_cleanup_report(
     failed: int,
     freed: int,
     log_path: str,
+    duration_s: float = 0.0,
 ) -> None:
     """Display the final cleanup report."""
+    duration_line = ""
+    if duration_s > 0:
+        duration_line = f"\n  Duration: [bold cyan]{_format_duration(duration_s)}[/]"
+
     console.print()
     console.print(Panel.fit(
         f"[bold green]Cleanup Complete![/]\n\n"
         f"  Deleted:  [bold green]{deleted:,}[/] items\n"
         f"  Failed:   [bold {'red' if failed else 'dim'}]{failed:,}[/] items\n"
-        f"  Freed:    [bold green]{_format_size(freed)}[/]\n\n"
+        f"  Freed:    [bold green]{_format_size(freed)}[/]"
+        f"{duration_line}\n\n"
         f"  Log file: [cyan]{log_path}[/]",
         border_style="green",
         title="[bold]SysClean Report[/]",

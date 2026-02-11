@@ -1,4 +1,4 @@
-"""
+r"""
 SysClean - Deep Windows 11 System Cleanup Utility
 
 Entry point: orchestrates scanning -> interactive selection -> cleanup.
@@ -11,7 +11,7 @@ Usage:
     python main.py --dry-run            Show what would be deleted (no actual deletion)
     python main.py --profile frontend   Use a cleanup profile
     python main.py --min-age 7          Only target files older than 7 days
-    python main.py --exclude C:\Keep    Exclude a path from cleanup
+    python main.py --exclude C:\\Keep    Exclude a path from cleanup
 """
 
 from __future__ import annotations
@@ -186,24 +186,33 @@ def main() -> int:
         BarColumn(bar_width=30),
         TextColumn("{task.percentage:>3.0f}%"),
         TextColumn("[cyan]({task.completed}/{task.total})[/]"),
+        TextColumn("[dim]{task.fields[timing]}[/]"),
         console=console,
     ) as progress:
-        task = progress.add_task("Initializing...", total=100)
+        task = progress.add_task("Initializing...", total=100, timing="")
 
-        def on_progress(name: str, current: int, total: int):
+        def on_progress(name: str, current: int, total: int,
+                        elapsed: float = 0.0, remaining: float = 0.0):
             if total > 0:
+                from models import _format_duration
+                timing_str = (f"elapsed {_format_duration(elapsed)} | "
+                              f"ETA {_format_duration(remaining)}")
                 progress.update(task, description=name,
-                                total=total, completed=current)
+                                total=total, completed=current,
+                                timing=timing_str)
 
         result = scan_all(
             include_registry=args.include_registry,
             progress_cb=on_progress,
             profile_rules=profile_rules,
         )
-        progress.update(task, description="Done!")
+        progress.update(task, description="Done!", timing="")
 
     # -- POST-SCAN FILTERING --
     _apply_filters(result, args, exclusions)
+
+    # -- TIMING SUMMARY --
+    _show_scan_timing(result)
 
     # Import UI functions
     from ui import (
@@ -239,8 +248,8 @@ def main() -> int:
                 item.selected = True
 
         from cleaner import clean
-        deleted, failed, freed, log_path = clean(result, log_dir=args.log_dir)
-        show_cleanup_report(deleted, failed, freed, log_path)
+        deleted, failed, freed, log_path, clean_duration = clean(result, log_dir=args.log_dir)
+        show_cleanup_report(deleted, failed, freed, log_path, clean_duration)
         return 0
 
     # -- INTERACTIVE MODE --
@@ -263,8 +272,8 @@ def main() -> int:
 
         # -- DELETE --
         from cleaner import clean
-        deleted, failed, freed, log_path = clean(result, log_dir=args.log_dir)
-        show_cleanup_report(deleted, failed, freed, log_path)
+        deleted, failed, freed, log_path, clean_duration = clean(result, log_dir=args.log_dir)
+        show_cleanup_report(deleted, failed, freed, log_path, clean_duration)
 
         if failed > 0:
             console.print(
@@ -306,6 +315,64 @@ def _apply_filters(result, args, exclusions) -> None:
             filtered.append(item)
 
         cat.items = filtered
+
+
+def _show_scan_timing(result) -> None:
+    """Show a table of time spent per scan rule with totals."""
+    from rich.table import Table
+    from rich import box
+    from models import _format_duration, _format_size
+
+    if not result.categories:
+        return
+
+    table = Table(
+        box=box.ROUNDED,
+        title="[bold]Scan Timing Summary[/]",
+        title_style="bold cyan",
+        show_lines=False,
+    )
+    table.add_column("#", justify="center", width=4)
+    table.add_column("Category", min_width=30)
+    table.add_column("Items", justify="right", width=8)
+    table.add_column("Size", justify="right", width=12)
+    table.add_column("Time Spent", justify="right", width=12)
+    table.add_column("% of Total", justify="right", width=10)
+
+    total_dur = result.total_scan_duration_s if result.total_scan_duration_s > 0 else 1.0
+
+    for idx, cat in enumerate(result.categories, 1):
+        pct = (cat.scan_duration_s / total_dur) * 100
+        time_style = "bold red" if pct > 30 else ("yellow" if pct > 15 else "green")
+
+        if cat.scan_error:
+            table.add_row(
+                str(idx), cat.name, "ERR", "-",
+                f"[{time_style}]{_format_duration(cat.scan_duration_s)}[/]",
+                f"[{time_style}]{pct:.1f}%[/]",
+            )
+        else:
+            table.add_row(
+                str(idx), cat.name,
+                f"{cat.item_count:,}",
+                cat.total_size_human,
+                f"[{time_style}]{_format_duration(cat.scan_duration_s)}[/]",
+                f"[{time_style}]{pct:.1f}%[/]",
+            )
+
+    # Totals row
+    table.add_section()
+    table.add_row(
+        "", "[bold]TOTAL[/]",
+        f"[bold]{result.total_items:,}[/]",
+        f"[bold]{result.total_size_human}[/]",
+        f"[bold]{_format_duration(result.total_scan_duration_s)}[/]",
+        "[bold]100%[/]",
+    )
+
+    console.print()
+    console.print(table)
+    console.print()
 
 
 def _show_detailed_scan(result) -> None:

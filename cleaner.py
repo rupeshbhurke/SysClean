@@ -21,7 +21,7 @@ from models import CleanupItem, ItemType, ScanResult
 def clean(
     result: ScanResult,
     log_dir: str = ".",
-) -> Tuple[int, int, int, str]:
+) -> Tuple[int, int, int, str, float]:
     """
     Delete all selected items from the scan result.
 
@@ -30,7 +30,7 @@ def clean(
         log_dir: Directory to write the deletion log CSV.
 
     Returns:
-        Tuple of (deleted_count, failed_count, bytes_freed, log_path).
+        Tuple of (deleted_count, failed_count, bytes_freed, log_path, duration_s).
     """
     # Collect all selected items
     items: List[CleanupItem] = []
@@ -40,7 +40,7 @@ def clean(
                 items.append(item)
 
     if not items:
-        return 0, 0, 0, ""
+        return 0, 0, 0, "", 0.0
 
     # Prepare log file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -51,18 +51,24 @@ def clean(
     freed = 0
     log_rows: List[dict] = []
 
+    from models import _format_duration
+
+    clean_start = time.perf_counter()
+
     with Progress(
         TextColumn("[bold blue]{task.description}"),
         BarColumn(bar_width=40),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TextColumn("({task.completed}/{task.total})"),
         TimeRemainingColumn(),
+        TextColumn("[dim]{task.fields[timing]}[/]"),
     ) as progress:
-        task = progress.add_task("Cleaning...", total=len(items))
+        task = progress.add_task("Cleaning...", total=len(items), timing="")
 
-        for item in items:
+        for i, item in enumerate(items):
             success = False
             error_msg = ""
+            item_start = time.perf_counter()
 
             try:
                 if item.item_type == ItemType.REGISTRY_KEY:
@@ -82,6 +88,12 @@ def clean(
                 failed += 1
                 error_msg = str(e)
 
+            item_duration = time.perf_counter() - item_start
+            elapsed = time.perf_counter() - clean_start
+            done = i + 1
+            avg_per_item = elapsed / done
+            remaining_est = avg_per_item * (len(items) - done)
+
             log_rows.append({
                 "timestamp": datetime.now().isoformat(),
                 "path": item.path,
@@ -90,14 +102,19 @@ def clean(
                 "size_bytes": item.size,
                 "status": "deleted" if success else "failed",
                 "error": error_msg,
+                "duration_ms": f"{item_duration * 1000:.1f}",
             })
 
-            progress.update(task, advance=1)
+            timing_str = (f"elapsed {_format_duration(elapsed)} | "
+                          f"ETA {_format_duration(remaining_est)}")
+            progress.update(task, advance=1, timing=timing_str)
+
+    total_duration = time.perf_counter() - clean_start
 
     # Write log CSV
     _write_log(log_path, log_rows)
 
-    return deleted, failed, freed, log_path
+    return deleted, failed, freed, log_path, total_duration
 
 
 def _delete_file(path: str) -> bool:
@@ -148,7 +165,7 @@ def _write_log(log_path: str, rows: List[dict]) -> None:
     if not rows:
         return
 
-    fieldnames = ["timestamp", "path", "type", "category", "size_bytes", "status", "error"]
+    fieldnames = ["timestamp", "path", "type", "category", "size_bytes", "status", "error", "duration_ms"]
     try:
         with open(log_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)

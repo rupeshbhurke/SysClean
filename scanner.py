@@ -5,6 +5,7 @@ SysClean — Scanner engine that orchestrates rule modules to collect cleanup it
 from __future__ import annotations
 
 import os
+import time
 import traceback
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -65,26 +66,38 @@ def scan_all(
         rules = [r for r in ALL_RULES if include_registry or r.name != "registry"]
 
     total = len(rules)
+    scan_start = time.perf_counter()
 
     for idx, rule_module in enumerate(rules):
         if progress_cb:
-            progress_cb(rule_module.display_name, idx, total)
+            elapsed = time.perf_counter() - scan_start
+            avg_per_rule = elapsed / max(idx, 1)
+            remaining = avg_per_rule * (total - idx)
+            progress_cb(rule_module.display_name, idx, total, elapsed, remaining)
 
+        rule_start = time.perf_counter()
         try:
             category = rule_module.scan()
-            if category and category.item_count > 0:
-                result.categories.append(category)
+            rule_duration = time.perf_counter() - rule_start
+            if category:
+                category.scan_duration_s = rule_duration
+                if category.item_count > 0:
+                    result.categories.append(category)
         except Exception:
+            rule_duration = time.perf_counter() - rule_start
             # Create an empty category with error info
             error_cat = CleanupCategory(
                 name=rule_module.display_name,
                 description=rule_module.description,
                 risk=rule_module.risk,
                 scan_error=traceback.format_exc(),
+                scan_duration_s=rule_duration,
             )
             result.categories.append(error_cat)
 
+    result.total_scan_duration_s = time.perf_counter() - scan_start
+
     if progress_cb:
-        progress_cb("Done", total, total)
+        progress_cb("Done", total, total, result.total_scan_duration_s, 0.0)
 
     return result

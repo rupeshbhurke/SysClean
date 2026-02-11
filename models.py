@@ -59,6 +59,7 @@ class CleanupCategory:
     items: List[CleanupItem] = field(default_factory=list)
     enabled: bool = True        # User can toggle entire category
     scan_error: Optional[str] = None  # Error message if scan failed
+    scan_duration_s: float = 0.0       # Time taken to scan this category (seconds)
 
     @property
     def total_size(self) -> int:
@@ -89,6 +90,7 @@ class CleanupCategory:
 class ScanResult:
     """Aggregated result of a full system scan."""
     categories: List[CleanupCategory] = field(default_factory=list)
+    total_scan_duration_s: float = 0.0  # Total wall-clock time for the scan
 
     @property
     def total_size(self) -> int:
@@ -126,3 +128,20 @@ def _format_size(size_bytes: int) -> str:
         size /= 1024.0
         idx += 1
     return f"{size:.1f} {units[idx]}"
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds into a human-readable duration string."""
+    if seconds < 0.001:
+        return "<1ms"
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    if minutes < 60:
+        return f"{minutes}m {secs:.0f}s"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m {secs:.0f}s"

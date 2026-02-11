@@ -102,6 +102,7 @@ python main.py --dry-run
 python main.py --profile frontend
 python main.py --profile backend
 python main.py --profile fullstack
+python main.py --profile everything
 
 # List available profiles
 python main.py --list-profiles
