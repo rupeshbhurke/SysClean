@@ -36,6 +36,11 @@ from rules import (
     shader_cache,
     icon_cache,
     teams_apps,
+    # Phase 2 — Deep Windows cleanup
+    service_profiles_temp,
+    orphaned_installers,
+    winsxs_cleanup,
+    driver_store_cleanup,
 )
 
 # Master list of all available rule modules
@@ -54,6 +59,11 @@ ALL_RULES: List[Any] = [
     shader_cache,
     icon_cache,
     teams_apps,
+    # ── Deep Windows cleanup ───────────────────────────────────────────
+    service_profiles_temp,
+    orphaned_installers,
+    winsxs_cleanup,
+    driver_store_cleanup,
     # ── Developer profiles ───────────────────────────────────────────────
     dev_nodejs,
     dev_python,

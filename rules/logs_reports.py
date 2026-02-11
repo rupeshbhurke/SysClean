@@ -45,7 +45,35 @@ def scan() -> CleanupCategory:
         user_dumps = os.path.join(local_app, "CrashDumps")
         _scan_dir_flat(category, user_dumps, "User crash dump")
 
-    # ── Memory dump ──────────────────────────────────────────────────────
+    # ── Windows Panther (setup/upgrade logs) ─────────────────────────
+    panther_dir = os.path.join(windir, "Panther")
+    if os.path.isdir(panther_dir):
+        size = _dir_size(panther_dir)
+        if size > 0:
+            category.items.append(CleanupItem(
+                path=panther_dir,
+                size=size,
+                category=category.name,
+                risk=risk,
+                item_type=ItemType.DIRECTORY,
+                description="Windows setup/upgrade logs (Panther)",
+            ))
+
+    # ── Live Kernel Reports ────────────────────────────────────────
+    lkr_dir = os.path.join(windir, "LiveKernelReports")
+    if os.path.isdir(lkr_dir):
+        size = _dir_size(lkr_dir)
+        if size > 0:
+            category.items.append(CleanupItem(
+                path=lkr_dir,
+                size=size,
+                category=category.name,
+                risk=risk,
+                item_type=ItemType.DIRECTORY,
+                description="Live kernel dump reports",
+            ))
+
+    # ── Memory dump ──────────────────────────────────────────────────
     memory_dmp = os.path.join(windir, "MEMORY.DMP")
     if os.path.isfile(memory_dmp):
         try:

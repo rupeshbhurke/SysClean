@@ -23,6 +23,7 @@ class ItemType(enum.Enum):
     FILE = "file"
     DIRECTORY = "directory"
     REGISTRY_KEY = "registry_key"
+    COMMAND = "command"          # Cleanup via subprocess (e.g. DISM, pnputil)
 
 
 @dataclass

@@ -77,7 +77,9 @@ def clean(
 
             def _do_delete(itm=item):
                 try:
-                    if itm.item_type == ItemType.REGISTRY_KEY:
+                    if itm.item_type == ItemType.COMMAND:
+                        result_holder["ok"] = _run_cleanup_command(itm.path)
+                    elif itm.item_type == ItemType.REGISTRY_KEY:
                         result_holder["ok"] = _delete_registry_key(itm.path)
                     elif itm.item_type == ItemType.FILE:
                         result_holder["ok"] = _delete_file(itm.path)
@@ -173,6 +175,22 @@ def _on_rm_error(func, path, exc_info):
         func(path)
     except (OSError, PermissionError):
         pass
+
+
+def _run_cleanup_command(command: str) -> bool:
+    """Run a cleanup command (e.g. DISM, pnputil) as a subprocess."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError, PermissionError):
+        return False
 
 
 def _delete_registry_key(key_path: str) -> bool:
