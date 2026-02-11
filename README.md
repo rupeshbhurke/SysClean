@@ -17,10 +17,10 @@ A powerful, interactive, CLI-based Windows 11 system cleanup utility built with 
 
 | Feature | Description |
 |---|---|
-| **19 Built-in Scan Rules** | System cleanup + developer caches + GPU/shader caches + app caches |
+| **23 Built-in Scan Rules** | System cleanup + deep Windows cleanup + developer caches + GPU/shader caches + app caches |
 | **7 Developer Profiles** | Node.js, Python, .NET, Java/Android, Rust/Go, Docker, IDE caches |
-| **Deep Registry Analyzer** | Orphaned uninstalls, SharedDLLs, COM/ActiveX, dead startup entries, stale MUI cache, orphaned App Paths |
-| **6 Cleanup Profiles** | `minimal`, `standard`, `frontend`, `backend`, `fullstack`, `everything` |
+| **Deep Windows Cleanup** | WinSxS DISM cleanup, DriverStore pruning, orphaned MSI/MSP detection, ServiceProfiles temp, Panther/LiveKernelReports |
+| **7 Cleanup Profiles** | `minimal`, `standard`, `deep`, `frontend`, `backend`, `fullstack`, `everything` |
 | **3-Phase Interactive UI** | Phase 1: category toggle → Phase 2: per-item drill-down (paginated) → Phase 3: final confirmation |
 | **Risk Levels** | Every item tagged as SAFE / LOW / MEDIUM / REGISTRY so users can make informed decisions |
 | **Dry-Run Mode** | See exactly what would be deleted without touching anything |
@@ -50,7 +50,7 @@ SysClean/
 │   ├── windows_update.py    # SoftwareDistribution\Download
 │   ├── prefetch.py          # Windows\Prefetch (.pf files)
 │   ├── caches.py            # Thumbnail, font, browser caches (Edge, Firefox)
-│   ├── logs_reports.py      # Windows logs, WER reports, crash dumps, MEMORY.DMP
+│   ├── logs_reports.py      # Windows logs, WER, Panther, LiveKernelReports, crash dumps
 │   ├── delivery_optimization.py  # Delivery Optimization peer-to-peer cache
 │   ├── installer.py         # $PatchCache$ and orphaned .tmp in Windows\Installer
 │   ├── old_windows.py       # Windows.old, $Windows.~BT, $Windows.~WS
@@ -58,6 +58,10 @@ SysClean/
 │   ├── shader_cache.py      # DirectX, NVIDIA, AMD, Intel GPU/shader caches
 │   ├── icon_cache.py        # Windows icon cache files
 │   ├── teams_apps.py        # Teams, OneDrive, Store app caches
+│   ├── service_profiles_temp.py  # LocalService/NetworkService AppData\Local\Temp bloat
+│   ├── orphaned_installers.py    # MSI/MSP files no longer referenced in registry
+│   ├── winsxs_cleanup.py         # WinSxS component store analysis + DISM cleanup
+│   ├── driver_store_cleanup.py   # Old driver versions in DriverStore removed via pnputil
 │   ├── dev_nodejs.py        # npm, Yarn, pnpm, Bun caches + stale node_modules
 │   ├── dev_python.py        # pip, conda, Poetry, pipx caches + __pycache__
 │   ├── dev_dotnet.py        # NuGet, Visual Studio caches + .vs folders
@@ -133,11 +137,12 @@ python main.py --log-dir C:\Logs
 | Profile | Description | Rules Included |
 |---|---|---|
 | **minimal** | Safe system cleanup only | temp_files, logs_reports, recycle_bin |
-| **standard** | All system rules (default) | All 12 system rules |
-| **frontend** | Standard + frontend dev caches | Standard + dev_nodejs, dev_ide |
-| **backend** | Standard + backend dev caches | Standard + dev_python, dev_dotnet, dev_java, dev_docker, dev_ide |
-| **fullstack** | Standard + all developer caches | Standard + all 7 dev rules |
-| **everything** | All rules including registry | All 19 rules + registry |
+| **standard** | Core system rules (default) | temp_files, windows_update, prefetch, caches, logs_reports, delivery_optimization, installer, old_windows, recycle_bin, shader_cache, icon_cache, teams_apps, service_profiles_temp |
+| **deep** | Standard + deep Windows cleanup | standard + orphaned_installers, winsxs_cleanup, driver_store_cleanup |
+| **frontend** | Standard + frontend dev caches | standard + dev_nodejs, dev_ide |
+| **backend** | Standard + backend dev caches | standard + dev_python, dev_dotnet, dev_java, dev_docker, dev_ide |
+| **fullstack** | Standard + all developer caches | standard + all 7 dev rules |
+| **everything** | All rules including registry | fullstack + orphaned_installers + winsxs_cleanup + driver_store_cleanup + registry |
 
 ---
 
@@ -173,7 +178,7 @@ The project follows a **pluggable rule-module** pattern:
 | **Windows Update Cache** | `SoftwareDistribution\Download` | SAFE |
 | **Prefetch Files** | `C:\Windows\Prefetch\*.pf` | LOW |
 | **Caches** | Thumbnail cache, Font cache, Edge cache, Firefox cache | SAFE |
-| **Logs & Error Reports** | `Windows\Logs`, WER (user & system), Minidumps, `MEMORY.DMP` | SAFE |
+| **Logs & Error Reports** | `Windows\Logs`, WER (user & system), Panther, LiveKernelReports, Minidumps, `MEMORY.DMP` | SAFE |
 | **Delivery Optimization** | DO cache directories | SAFE |
 | **Installer Patch Cache** | `$PatchCache$`, orphaned `.tmp` in `Windows\Installer` | MEDIUM |
 | **Old Windows Installations** | `Windows.old`, `$Windows.~BT`, `$Windows.~WS` | SAFE |
@@ -181,6 +186,10 @@ The project follows a **pluggable rule-module** pattern:
 | **GPU & Shader Caches** | DirectX D3DSCache, NVIDIA GL/DX cache, AMD GL/DX cache, Intel shader cache | SAFE |
 | **Windows Icon Cache** | `IconCache.db`, Explorer `iconcache_*.db` | LOW |
 | **Teams, OneDrive & Store Apps** | Teams Classic cache, OneDrive logs, Store app TempState/INetCache | SAFE |
+| **Service Profiles Temp** | `C:\Windows\ServiceProfiles\LocalService/NetworkService\AppData\Local\Temp` | SAFE |
+| **Orphaned Installer Packages** | `.msi/.msp` in `C:\Windows\Installer` not referenced in registry | MEDIUM |
+| **WinSxS Component Store** | DISM-analyzed superseded components | MEDIUM |
+| **Old Driver Packages** | Legacy drivers via `pnputil /delete-driver` | MEDIUM |
 
 ### Developer Caches
 
