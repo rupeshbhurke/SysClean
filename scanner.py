@@ -9,6 +9,7 @@ import time
 import traceback
 from pathlib import Path
 from typing import Callable, List, Optional
+import threading
 
 from models import CleanupCategory, ScanResult
 from rules import ALL_RULES
@@ -68,36 +69,68 @@ def scan_all(
     total = len(rules)
     scan_start = time.perf_counter()
 
+    def emit_progress(label: str, completed_count: int):
+        if not progress_cb:
+            return
+        elapsed = time.perf_counter() - scan_start
+        divisor = completed_count if completed_count > 0 else 1
+        avg_per_rule = elapsed / divisor
+        remaining = avg_per_rule * max(total - completed_count, 0)
+        progress_cb(label, completed_count, total, elapsed, remaining)
+
     for idx, rule_module in enumerate(rules):
-        if progress_cb:
-            elapsed = time.perf_counter() - scan_start
-            avg_per_rule = elapsed / max(idx, 1)
-            remaining = avg_per_rule * (total - idx)
-            progress_cb(rule_module.display_name, idx, total, elapsed, remaining)
+        label = f"{rule_module.display_name} ({idx + 1}/{total})"
+        emit_progress(label, idx)
 
         rule_start = time.perf_counter()
-        try:
-            category = rule_module.scan()
-            rule_duration = time.perf_counter() - rule_start
-            if category:
-                category.scan_duration_s = rule_duration
-                if category.item_count > 0:
-                    result.categories.append(category)
-        except Exception:
-            rule_duration = time.perf_counter() - rule_start
-            # Create an empty category with error info
+        result_holder: dict[str, CleanupCategory] = {}
+        error_holder: dict[str, str] = {}
+
+        def _run_rule() -> None:
+            try:
+                category = rule_module.scan()
+                if category:
+                    result_holder["category"] = category
+            except Exception:
+                error_holder["trace"] = traceback.format_exc()
+
+        worker = threading.Thread(
+            target=_run_rule,
+            name=f"SysCleanRule-{rule_module.name}",
+            daemon=True,
+        )
+        worker.start()
+
+        while worker.is_alive():
+            worker.join(timeout=0.2)
+            if worker.is_alive():
+                emit_progress(label, idx)
+
+        worker.join()
+        rule_duration = time.perf_counter() - rule_start
+
+        if error_holder:
             error_cat = CleanupCategory(
                 name=rule_module.display_name,
                 description=rule_module.description,
                 risk=rule_module.risk,
-                scan_error=traceback.format_exc(),
+                scan_error=error_holder["trace"],
                 scan_duration_s=rule_duration,
             )
             result.categories.append(error_cat)
+            emit_progress(f"{rule_module.display_name} ✗ ({idx + 1}/{total})", idx + 1)
+            continue
+
+        category = result_holder.get("category")
+        if category:
+            category.scan_duration_s = rule_duration
+            if category.item_count > 0:
+                result.categories.append(category)
+
+        emit_progress(f"{rule_module.display_name} ✓ ({idx + 1}/{total})", idx + 1)
 
     result.total_scan_duration_s = time.perf_counter() - scan_start
 
-    if progress_cb:
-        progress_cb("Done", total, total, result.total_scan_duration_s, 0.0)
+    emit_progress("Done", total)
 
     return result

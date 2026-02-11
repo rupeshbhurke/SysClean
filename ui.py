@@ -1,9 +1,8 @@
 """
-SysClean - Multi-phase interactive selection UI using Rich.
+SysClean - Interactive selection UI using InquirerPy + Rich.
 
-Phase 1: Category selection (toggle entire categories)
-Phase 2: Drill-down into individual items (paginated)
-Phase 3: Final confirmation before deletion
+Uses arrow-key driven checkbox prompts for category and item selection,
+with Rich panels and tables for summaries and reports.
 """
 
 from __future__ import annotations
@@ -18,11 +17,19 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 
+from InquirerPy import inquirer
+from InquirerPy.separator import Separator
+
 from models import CleanupCategory, CleanupItem, ScanResult, RiskLevel, ItemType, _format_size, _format_duration
 
 console = Console()
 
-ITEMS_PER_PAGE = 40
+RISK_TAGS = {
+    RiskLevel.SAFE: "SAFE",
+    RiskLevel.LOW: "LOW",
+    RiskLevel.MEDIUM: "MED",
+    RiskLevel.REGISTRY: "REG",
+}
 
 RISK_COLORS = {
     RiskLevel.SAFE: "green",
@@ -31,16 +38,9 @@ RISK_COLORS = {
     RiskLevel.REGISTRY: "magenta",
 }
 
-RISK_LABELS = {
-    RiskLevel.SAFE: "[SAFE]",
-    RiskLevel.LOW: "[LOW]",
-    RiskLevel.MEDIUM: "[MED]",
-    RiskLevel.REGISTRY: "[REG]",
-}
-
 
 def show_scan_summary(result: ScanResult) -> None:
-    """Display a summary table after scanning."""
+    """Display a summary panel after scanning."""
     console.print()
     console.print(Panel.fit(
         f"[bold cyan]Scan Complete[/]\n"
@@ -52,202 +52,147 @@ def show_scan_summary(result: ScanResult) -> None:
     console.print()
 
 
-def phase1_category_selection(result: ScanResult) -> bool:
+def select_categories(result: ScanResult) -> bool:
     """
-    Phase 1: Let the user toggle entire categories on/off.
+    Arrow-key checkbox prompt for category selection.
 
-    Returns True if user wants to proceed, False to abort.
+    Returns True if user selected at least one category, False to abort.
     """
-    while True:
-        console.print()
-        console.print("[bold cyan]=== PHASE 1: Category Selection ===[/]")
-        console.print("[dim]Toggle categories by entering their number. "
-                      "Type 'all' to select all, 'none' to deselect all, "
-                      "'next' to proceed, 'quit' to exit.[/]\n")
-
-        table = Table(
-            box=box.ROUNDED,
-            title="Cleanup Categories",
-            title_style="bold white",
-            show_lines=True,
+    choices = []
+    for cat in result.categories:
+        if cat.scan_error:
+            continue
+        tag = RISK_TAGS.get(cat.risk, "?")
+        label = (
+            f"{cat.name:<38s}  {cat.item_count:>5,} items  "
+            f"{cat.total_size_human:>10s}  [{tag}]"
         )
-        table.add_column("#", justify="center", style="bold", width=4)
-        table.add_column("Selected", justify="center", width=8)
-        table.add_column("Category", min_width=30)
-        table.add_column("Items", justify="right", width=8)
-        table.add_column("Size", justify="right", width=12)
-        table.add_column("Risk", justify="center", width=12)
+        choices.append({
+            "name": label,
+            "value": cat.name,
+            "enabled": cat.enabled,
+        })
 
-        for idx, cat in enumerate(result.categories, 1):
-            selected = "[x]" if cat.enabled else "[ ]"
-            sel_style = "green" if cat.enabled else "dim"
-            risk_color = RISK_COLORS.get(cat.risk, "white")
-            risk_label = RISK_LABELS.get(cat.risk, str(cat.risk.value))
+    if not choices:
+        console.print("[yellow]No scannable categories found.[/]")
+        return False
 
-            if cat.scan_error:
-                table.add_row(
-                    str(idx), "ERR", cat.name, "ERROR", "-",
-                    "[red]Error[/]",
-                )
-            else:
-                table.add_row(
-                    str(idx),
-                    f"[{sel_style}]{selected}[/]",
-                    cat.name,
-                    f"{cat.item_count:,}",
-                    cat.total_size_human,
-                    f"[{risk_color}]{risk_label}[/]",
-                )
+    console.print("[bold cyan]Select categories to clean[/]")
+    console.print("[dim]  ↑/↓ navigate  ·  Space toggle  ·  "
+                  "Ctrl+A select all  ·  Enter confirm  ·  Ctrl+C cancel[/]\n")
 
-        console.print(table)
+    try:
+        selected = inquirer.checkbox(
+            message="Categories:",
+            choices=choices,
+            cycle=True,
+            instruction="",
+        ).execute()
+    except KeyboardInterrupt:
+        return False
 
-        # Show selected total
-        selected_cats = [c for c in result.categories if c.enabled and not c.scan_error]
-        total_sel_size = sum(c.total_size for c in selected_cats)
-        total_sel_items = sum(c.item_count for c in selected_cats)
-        console.print(
-            f"\n  [bold]Selected:[/] {len(selected_cats)} categories, "
-            f"{total_sel_items:,} items, [green]{_format_size(total_sel_size)}[/]\n"
-        )
+    if selected is None:
+        return False
 
-        choice = console.input("[bold yellow]>> Enter choice: [/]").strip().lower()
+    selected_set = set(selected)
 
-        if choice == "quit" or choice == "q":
-            return False
-        elif choice == "next" or choice == "n":
-            if not any(c.enabled for c in result.categories):
-                console.print("[red]No categories selected. Select at least one or quit.[/]")
-                continue
-            return True
-        elif choice == "all" or choice == "a":
-            for c in result.categories:
-                if not c.scan_error:
-                    c.enabled = True
-        elif choice == "none":
-            for c in result.categories:
-                c.enabled = False
-        else:
-            # Try to parse as number(s)
-            _toggle_by_input(choice, result.categories)
+    for cat in result.categories:
+        cat.enabled = cat.name in selected_set
+
+    if not selected_set:
+        console.print("[red]No categories selected.[/]")
+        return False
+
+    return True
 
 
-def phase2_item_drilldown(result: ScanResult) -> bool:
+def review_items(result: ScanResult) -> bool:
     """
-    Phase 2: Let the user review and deselect individual items within
-    selected categories. Paginated for large lists.
+    Offer to drill down into each selected category to toggle individual items.
 
-    Returns True to proceed, False to go back to Phase 1.
+    Returns True to proceed to confirmation, False to go back.
     """
-    selected_cats = [c for c in result.categories if c.enabled and not c.scan_error]
+    selected_cats = [c for c in result.categories if c.enabled and not c.scan_error and c.item_count > 0]
 
-    for cat_idx, cat in enumerate(selected_cats):
-        if not _review_category_items(cat, cat_idx + 1, len(selected_cats)):
+    if not selected_cats:
+        return True
+
+    console.print()
+    try:
+        want_review = inquirer.confirm(
+            message="Review individual items per category?",
+            default=False,
+        ).execute()
+    except KeyboardInterrupt:
+        return False
+
+    if not want_review:
+        return True
+
+    for cat in selected_cats:
+        if not _review_category_items(cat):
             return False
 
     return True
 
 
-def _review_category_items(
-    cat: CleanupCategory,
-    cat_num: int,
-    total_cats: int,
-) -> bool:
-    """Review items in a single category with pagination."""
+def _review_category_items(cat: CleanupCategory) -> bool:
+    """Arrow-key checkbox for items within one category."""
     items = cat.items
     if not items:
         return True
 
-    # Initially all items are selected
-    page = 0
-    total_pages = max(1, (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    # Sort by size descending for better UX
+    sorted_items = sorted(items, key=lambda x: x.size, reverse=True)
 
-    while True:
-        console.print()
-        console.print(f"[bold cyan]=== PHASE 2: Review Items -- "
-                      f"{cat.name} ({cat_num}/{total_cats}) ===[/]")
-        console.print(f"[dim]Page {page + 1}/{total_pages} | "
-                      f"Toggle items by number, 'sa' select all, 'da' deselect all, "
-                      f"'pg N' go to page, 'next' accept & move on, 'back' go to Phase 1[/]\n")
-
-        start = page * ITEMS_PER_PAGE
-        end = min(start + ITEMS_PER_PAGE, len(items))
-        page_items = items[start:end]
-
-        table = Table(box=box.SIMPLE_HEAVY, show_lines=False)
-        table.add_column("#", justify="right", width=6)
-        table.add_column("Sel", justify="center", width=5)
-        table.add_column("Path", max_width=70, overflow="ellipsis")
-        table.add_column("Size", justify="right", width=12)
-        table.add_column("Type", width=5)
-
-        for i, item in enumerate(page_items, start + 1):
-            sel = "[x]" if item.selected else "[ ]"
-            sel_style = "green" if item.selected else "dim"
-            type_label = "DIR" if item.item_type == ItemType.DIRECTORY else (
-                "REG" if item.item_type == ItemType.REGISTRY_KEY else "FILE"
-            )
-
-            # Shorten long paths
-            display_path = item.path
-            if len(display_path) > 68:
-                display_path = "..." + display_path[-65:]
-
-            table.add_row(
-                str(i),
-                f"[{sel_style}]{sel}[/]",
-                display_path,
-                item.size_human,
-                type_label,
-            )
-
-        console.print(table)
-
-        sel_count = sum(1 for it in items if it.selected)
-        sel_size = sum(it.size for it in items if it.selected)
-        console.print(
-            f"\n  [bold]Selected:[/] {sel_count:,}/{len(items):,} items, "
-            f"[green]{_format_size(sel_size)}[/]"
+    choices = []
+    for item in sorted_items:
+        type_label = "DIR" if item.item_type == ItemType.DIRECTORY else (
+            "REG" if item.item_type == ItemType.REGISTRY_KEY else "FILE"
         )
+        # Shorten path for display
+        display_path = item.path
+        if len(display_path) > 60:
+            display_path = "..." + display_path[-57:]
 
-        choice = console.input("[bold yellow]>> Enter choice: [/]").strip().lower()
+        label = f"{display_path:<63s}  {item.size_human:>10s}  {type_label}"
+        choices.append({
+            "name": label,
+            "value": item.path,
+            "enabled": item.selected,
+        })
 
-        if choice in ("next", "n"):
-            return True
-        elif choice in ("back", "b"):
-            return False
-        elif choice in ("sa",):
-            for it in items:
-                it.selected = True
-        elif choice in ("da",):
-            for it in items:
-                it.selected = False
-        elif choice.startswith("pg "):
-            try:
-                pg = int(choice.split()[1]) - 1
-                if 0 <= pg < total_pages:
-                    page = pg
-                else:
-                    console.print(f"[red]Page must be 1-{total_pages}[/]")
-            except (ValueError, IndexError):
-                console.print("[red]Invalid page number[/]")
-        elif choice == ">" or choice == "pn":
-            if page < total_pages - 1:
-                page += 1
-        elif choice == "<" or choice == "pp":
-            if page > 0:
-                page -= 1
-        else:
-            _toggle_items_by_input(choice, items)
+    console.print(f"\n[bold cyan]{cat.name}[/] — "
+                  f"{cat.item_count:,} items, {cat.total_size_human}")
+    console.print("[dim]  ↑/↓ navigate  ·  Space toggle  ·  Enter confirm[/]\n")
+
+    try:
+        selected = inquirer.checkbox(
+            message=f"Items in {cat.name}:",
+            choices=choices,
+            cycle=True,
+            instruction="",
+        ).execute()
+    except KeyboardInterrupt:
+        return False
+
+    if selected is None:
+        return False
+
+    selected_paths = set(selected)
+    for item in items:
+        item.selected = item.path in selected_paths
+
+    return True
 
 
-def phase3_final_confirmation(result: ScanResult) -> bool:
+def confirm_deletion(result: ScanResult) -> bool:
     """
-    Phase 3: Show final summary and ask for confirmation.
+    Show final summary table and ask for confirmation.
 
     Returns True if user confirms deletion, False to go back.
     """
     console.print()
-    console.print("[bold cyan]=== PHASE 3: Final Confirmation ===[/]\n")
 
     table = Table(
         box=box.ROUNDED,
@@ -276,13 +221,13 @@ def phase3_final_confirmation(result: ScanResult) -> bool:
         total_size += sel_size
 
         risk_color = RISK_COLORS.get(cat.risk, "white")
-        risk_label = RISK_LABELS.get(cat.risk, str(cat.risk.value))
+        risk_tag = RISK_TAGS.get(cat.risk, str(cat.risk.value))
 
         table.add_row(
             cat.name,
             f"{sel_count:,}",
             cat.selected_size_human,
-            f"[{risk_color}]{risk_label}[/]",
+            f"[{risk_color}][{risk_tag}][/]",
         )
 
     table.add_section()
@@ -307,17 +252,18 @@ def phase3_final_confirmation(result: ScanResult) -> bool:
         border_style="red",
     ))
 
-    answer = console.input(
-        "[bold red]>> Type 'DELETE' to confirm, 'back' to review, 'quit' to exit: [/]"
-    ).strip()
+    try:
+        answer = inquirer.text(
+            message="Type DELETE to confirm, or anything else to cancel:",
+        ).execute()
+    except KeyboardInterrupt:
+        return False
 
-    if answer == "DELETE":
+    if answer and answer.strip() == "DELETE":
         return True
-    elif answer.lower() in ("back", "b"):
-        return False
-    else:
-        console.print("[yellow]Aborted.[/]")
-        return False
+
+    console.print("[yellow]Aborted.[/]")
+    return False
 
 
 def show_cleanup_report(
@@ -344,50 +290,3 @@ def show_cleanup_report(
         title="[bold]SysClean Report[/]",
     ))
     console.print()
-
-
-# -- Helpers --
-
-def _toggle_by_input(choice: str, categories: List[CleanupCategory]) -> None:
-    """Parse user input and toggle categories by number."""
-    nums = _parse_numbers(choice)
-    for n in nums:
-        idx = n - 1
-        if 0 <= idx < len(categories) and not categories[idx].scan_error:
-            categories[idx].enabled = not categories[idx].enabled
-        else:
-            console.print(f"[red]Invalid category number: {n}[/]")
-
-
-def _toggle_items_by_input(choice: str, items: List[CleanupItem]) -> None:
-    """Parse user input and toggle items by number."""
-    nums = _parse_numbers(choice)
-    for n in nums:
-        idx = n - 1
-        if 0 <= idx < len(items):
-            items[idx].selected = not items[idx].selected
-        else:
-            console.print(f"[red]Invalid item number: {n}[/]")
-
-
-def _parse_numbers(text: str) -> List[int]:
-    """
-    Parse a string of numbers and ranges like '1 3 5-8 12'.
-    Returns sorted list of integers.
-    """
-    numbers = []
-    for part in text.replace(",", " ").split():
-        part = part.strip()
-        if "-" in part:
-            try:
-                a, b = part.split("-", 1)
-                a, b = int(a), int(b)
-                numbers.extend(range(min(a, b), max(a, b) + 1))
-            except ValueError:
-                pass
-        else:
-            try:
-                numbers.append(int(part))
-            except ValueError:
-                pass
-    return sorted(set(numbers))

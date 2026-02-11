@@ -221,9 +221,9 @@ def main() -> int:
     # Import UI functions
     from ui import (
         show_scan_summary,
-        phase1_category_selection,
-        phase2_item_drilldown,
-        phase3_final_confirmation,
+        select_categories,
+        review_items,
+        confirm_deletion,
         show_cleanup_report,
     )
 
@@ -258,21 +258,18 @@ def main() -> int:
 
     # -- INTERACTIVE MODE --
     while True:
-        # Phase 1: Category selection
-        proceed = phase1_category_selection(result)
-        if not proceed:
+        # Step 1: Category selection (arrow-key checkboxes)
+        if not select_categories(result):
             console.print("[yellow]Cleanup cancelled.[/]")
             return 0
 
-        # Phase 2: Item drill-down
-        proceed = phase2_item_drilldown(result)
-        if not proceed:
-            continue  # Go back to Phase 1
+        # Step 2: Optional item-level review
+        if not review_items(result):
+            continue  # Back to category selection
 
-        # Phase 3: Final confirmation
-        confirmed = phase3_final_confirmation(result)
-        if not confirmed:
-            continue  # Go back to Phase 1
+        # Step 3: Final confirmation
+        if not confirm_deletion(result):
+            continue  # Back to category selection
 
         # -- DELETE --
         from cleaner import clean
