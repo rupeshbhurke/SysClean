@@ -182,31 +182,35 @@ def main() -> int:
 
     with Progress(
         SpinnerColumn("dots"),
-        TextColumn("[bold blue]Scanning: {task.description}"),
-        BarColumn(bar_width=30),
+        TextColumn("{task.fields[info]}"),
+        BarColumn(bar_width=20),
         TextColumn("{task.percentage:>3.0f}%"),
-        TextColumn("[cyan]({task.completed}/{task.total})[/]"),
-        TextColumn("[dim]{task.fields[timing]}[/]"),
         console=console,
     ) as progress:
-        task = progress.add_task("Initializing...", total=100, timing="")
+        task = progress.add_task("Initializing...", total=100, info="[bold blue]Scanning...[/]")
 
         def on_progress(name: str, current: int, total: int,
                         elapsed: float = 0.0, remaining: float = 0.0):
             if total > 0:
                 from models import _format_duration
-                timing_str = (f"elapsed {_format_duration(elapsed)} | "
-                              f"ETA {_format_duration(remaining)}")
+                info_str = (
+                    f"[bold blue]{name}[/] "
+                    f"[cyan]({current+1}/{total})[/] "
+                    f"[dim]elapsed {_format_duration(elapsed)} "
+                    f"| ETA {_format_duration(remaining)}[/]"
+                )
                 progress.update(task, description=name,
                                 total=total, completed=current,
-                                timing=timing_str)
+                                info=info_str)
 
         result = scan_all(
             include_registry=args.include_registry,
             progress_cb=on_progress,
             profile_rules=profile_rules,
         )
-        progress.update(task, description="Done!", timing="")
+        from models import _format_duration
+        progress.update(task, description="Done!",
+                        info=f"[bold green]Done![/] [dim]Total: {_format_duration(result.total_scan_duration_s)}[/]")
 
     # -- POST-SCAN FILTERING --
     _apply_filters(result, args, exclusions)
