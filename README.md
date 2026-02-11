@@ -284,7 +284,7 @@ To add a new cleanup rule:
 
 ## License
 
-Internal R&D project. Not licensed for external distribution.
+MIT License — see [LICENSE](./LICENSE) for full text.
 
 ---
 
