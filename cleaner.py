@@ -9,6 +9,7 @@ import os
 import shutil
 import stat
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
@@ -70,23 +71,46 @@ def clean(
             error_msg = ""
             item_start = time.perf_counter()
 
-            try:
-                if item.item_type == ItemType.REGISTRY_KEY:
-                    success = _delete_registry_key(item.path)
-                elif item.item_type == ItemType.FILE:
-                    success = _delete_file(item.path)
-                elif item.item_type == ItemType.DIRECTORY:
-                    success = _delete_directory(item.path)
+            # Run deletion in background thread so we can update the
+            # progress bar timing while a large item is being deleted.
+            result_holder: dict = {}
 
-                if success:
-                    deleted += 1
-                    freed += item.size
-                else:
-                    failed += 1
-                    error_msg = "Delete returned False"
-            except Exception as e:
+            def _do_delete(itm=item):
+                try:
+                    if itm.item_type == ItemType.REGISTRY_KEY:
+                        result_holder["ok"] = _delete_registry_key(itm.path)
+                    elif itm.item_type == ItemType.FILE:
+                        result_holder["ok"] = _delete_file(itm.path)
+                    elif itm.item_type == ItemType.DIRECTORY:
+                        result_holder["ok"] = _delete_directory(itm.path)
+                except Exception as exc:
+                    result_holder["ok"] = False
+                    result_holder["err"] = str(exc)
+
+            worker = threading.Thread(target=_do_delete, daemon=True)
+            worker.start()
+
+            # Poll every 0.5 s so the timer keeps ticking
+            while worker.is_alive():
+                worker.join(timeout=0.5)
+                elapsed = time.perf_counter() - clean_start
+                done = i  # not yet completed
+                avg_per_item = elapsed / max(done, 1)
+                remaining_est = avg_per_item * (len(items) - done)
+                timing_str = (f"elapsed {_format_duration(elapsed)} | "
+                              f"ETA {_format_duration(remaining_est)}")
+                progress.update(task, completed=i, timing=timing_str)
+
+            success = result_holder.get("ok", False)
+            error_msg = result_holder.get("err", "")
+
+            if success:
+                deleted += 1
+                freed += item.size
+            else:
                 failed += 1
-                error_msg = str(e)
+                if not error_msg:
+                    error_msg = "Delete returned False"
 
             item_duration = time.perf_counter() - item_start
             elapsed = time.perf_counter() - clean_start
@@ -107,7 +131,7 @@ def clean(
 
             timing_str = (f"elapsed {_format_duration(elapsed)} | "
                           f"ETA {_format_duration(remaining_est)}")
-            progress.update(task, advance=1, timing=timing_str)
+            progress.update(task, completed=done, timing=timing_str)
 
     total_duration = time.perf_counter() - clean_start
 
