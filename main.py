@@ -1,0 +1,240 @@
+"""
+SysClean - Deep Windows 11 System Cleanup Utility
+
+Entry point: orchestrates scanning -> interactive selection -> cleanup.
+
+Usage:
+    python main.py                      Interactive full cleanup
+    python main.py --scan-only          Scan and report only (no deletion)
+    python main.py --include-registry   Include orphaned registry entry detection
+    python main.py --auto               Auto-select all and delete (skip UI)
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import os
+import sys
+import time
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+console = Console()
+
+BANNER = r"""
+   ____            ____ _
+  / ___| _   _ ___/ ___| | ___  __ _ _ __
+  \___ \| | | / __| |   | |/ _ \/ _` | '_ \
+   ___) | |_| \__ \ |___| |  __/ (_| | | | |
+  |____/ \__, |___/\____|_|\___|\__,_|_| |_|
+         |___/
+  Deep Windows 11 System Cleanup Utility v1.0
+"""
+
+
+def is_admin() -> bool:
+    """Check if the script is running with administrator privileges."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def request_elevation() -> None:
+    """Show message about needing admin rights."""
+    console.print(Panel(
+        "[bold red](!!) Administrator privileges required![/]\n\n"
+        "SysClean needs admin rights to access system directories like:\n"
+        "  - C:\\Windows\\Temp\n"
+        "  - C:\\Windows\\Prefetch\n"
+        "  - C:\\Windows\\SoftwareDistribution\n\n"
+        "Please right-click your terminal and select\n"
+        "[bold]'Run as administrator'[/], then try again.",
+        border_style="red",
+        title="[bold]Elevation Required[/]",
+    ))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="SysClean - Deep Windows 11 System Cleanup Utility",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="Scan and display results without deleting anything",
+    )
+    parser.add_argument(
+        "--include-registry",
+        action="store_true",
+        help="Include orphaned registry entry detection",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-select all items and delete without interactive UI",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=".",
+        help="Directory to save the cleanup log CSV (default: current dir)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    # Print banner
+    console.print(f"[bold cyan]{BANNER}[/]")
+
+    # Check admin
+    if not is_admin():
+        request_elevation()
+        console.print("\n[dim]Running in limited mode -- some system directories may be inaccessible.[/]\n")
+        proceed = console.input("[yellow]Continue anyway? (y/n): [/]").strip().lower()
+        if proceed not in ("y", "yes"):
+            return 1
+
+    console.print("[bold]Starting deep system scan...[/]\n")
+
+    # -- SCAN --
+    from scanner import scan_all
+
+    with Progress(
+        SpinnerColumn("dots"),
+        TextColumn("[bold blue]Scanning: {task.description}"),
+        BarColumn(bar_width=30),
+        TextColumn("{task.percentage:>3.0f}%"),
+        TextColumn("[cyan]({task.completed}/{task.total})[/]"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Initializing...", total=9)
+
+        def on_progress(name: str, current: int, total: int):
+            if total > 0:
+                progress.update(task, description=name,
+                                total=total, completed=current)
+
+        result = scan_all(
+            include_registry=args.include_registry,
+            progress_cb=on_progress,
+        )
+        progress.update(task, description="Done!")
+
+    # Import UI functions
+    from ui import (
+        show_scan_summary,
+        phase1_category_selection,
+        phase2_item_drilldown,
+        phase3_final_confirmation,
+        show_cleanup_report,
+    )
+
+    # -- DISPLAY RESULTS --
+    show_scan_summary(result)
+
+    if result.total_items == 0:
+        console.print("[green]Your system is already clean! No items found to delete.[/]")
+        return 0
+
+    # -- SCAN-ONLY MODE --
+    if args.scan_only:
+        _show_detailed_scan(result)
+        console.print("[dim]Scan-only mode. No files were deleted.[/]")
+        return 0
+
+    # -- AUTO MODE --
+    if args.auto:
+        console.print("[yellow]Auto mode: all items selected for deletion.[/]")
+        for cat in result.categories:
+            cat.enabled = True
+            for item in cat.items:
+                item.selected = True
+
+        from cleaner import clean
+        deleted, failed, freed, log_path = clean(result, log_dir=args.log_dir)
+        show_cleanup_report(deleted, failed, freed, log_path)
+        return 0
+
+    # -- INTERACTIVE MODE --
+    while True:
+        # Phase 1: Category selection
+        proceed = phase1_category_selection(result)
+        if not proceed:
+            console.print("[yellow]Cleanup cancelled.[/]")
+            return 0
+
+        # Phase 2: Item drill-down
+        proceed = phase2_item_drilldown(result)
+        if not proceed:
+            continue  # Go back to Phase 1
+
+        # Phase 3: Final confirmation
+        confirmed = phase3_final_confirmation(result)
+        if not confirmed:
+            continue  # Go back to Phase 1
+
+        # -- DELETE --
+        from cleaner import clean
+        deleted, failed, freed, log_path = clean(result, log_dir=args.log_dir)
+        show_cleanup_report(deleted, failed, freed, log_path)
+
+        if failed > 0:
+            console.print(
+                f"[yellow]Note: {failed} items could not be deleted "
+                f"(likely locked by the OS or another process). "
+                f"Check the log for details.[/]"
+            )
+
+        return 0
+
+
+def _show_detailed_scan(result) -> None:
+    """Show a detailed breakdown of all scan results (scan-only mode)."""
+    from rich.table import Table
+    from rich import box
+    from models import _format_size
+
+    for cat in result.categories:
+        if cat.scan_error:
+            console.print(f"\n[red]X {cat.name}: SCAN ERROR[/]")
+            console.print(f"  [dim]{cat.scan_error[:200]}[/]")
+            continue
+
+        console.print(f"\n[bold cyan]> {cat.name}[/] -- "
+                      f"{cat.item_count:,} items, {cat.total_size_human}")
+
+        if cat.item_count <= 20:
+            table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+            table.add_column("Path", max_width=75)
+            table.add_column("Size", justify="right", width=12)
+            for item in cat.items:
+                table.add_row(item.path, item.size_human)
+            console.print(table)
+        else:
+            # Show top 10 largest items
+            sorted_items = sorted(cat.items, key=lambda x: x.size, reverse=True)
+            table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+            table.add_column("Path", max_width=75)
+            table.add_column("Size", justify="right", width=12)
+            for item in sorted_items[:10]:
+                table.add_row(item.path, item.size_human)
+            console.print(table)
+            remaining = cat.item_count - 10
+            remaining_size = sum(it.size for it in sorted_items[10:])
+            console.print(f"  [dim]... and {remaining:,} more items "
+                          f"({_format_size(remaining_size)})[/]")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted. No changes made.[/]")
+        sys.exit(130)
