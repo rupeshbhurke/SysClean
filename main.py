@@ -8,6 +8,10 @@ Usage:
     python main.py --scan-only          Scan and report only (no deletion)
     python main.py --include-registry   Include orphaned registry entry detection
     python main.py --auto               Auto-select all and delete (skip UI)
+    python main.py --dry-run            Show what would be deleted (no actual deletion)
+    python main.py --profile frontend   Use a cleanup profile
+    python main.py --min-age 7          Only target files older than 7 days
+    python main.py --exclude C:\Keep    Exclude a path from cleanup
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ BANNER = r"""
    ___) | |_| \__ \ |___| |  __/ (_| | | | |
   |____/ \__, |___/\____|_|\___|\__,_|_| |_|
          |___/
-  Deep Windows 11 System Cleanup Utility v1.0
+  Deep Windows 11 System Cleanup Utility v2.0
 """
 
 
@@ -84,6 +88,38 @@ def parse_args() -> argparse.Namespace:
         default=".",
         help="Directory to save the cleanup log CSV (default: current dir)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without actually deleting anything",
+    )
+    parser.add_argument(
+        "--min-age",
+        type=int,
+        default=0,
+        metavar="DAYS",
+        help="Only target files older than DAYS days (default: 0 = no filter)",
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Use a cleanup profile: minimal, standard, frontend, backend, fullstack, everything",
+    )
+    parser.add_argument(
+        "--exclude",
+        type=str,
+        nargs="*",
+        default=[],
+        metavar="PATH",
+        help="Paths to exclude from cleanup",
+    )
+    parser.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="List available cleanup profiles and exit",
+    )
     return parser.parse_args()
 
 
@@ -93,6 +129,15 @@ def main() -> int:
     # Print banner
     console.print(f"[bold cyan]{BANNER}[/]")
 
+    # -- LIST PROFILES --
+    if args.list_profiles:
+        from config import BUILTIN_PROFILES
+        console.print("[bold cyan]Available Cleanup Profiles:[/]\n")
+        for name, profile in BUILTIN_PROFILES.items():
+            console.print(f"  [bold]{name:12s}[/] — {profile.description}")
+            console.print(f"               [dim]Rules: {', '.join(profile.rules)}[/]")
+        return 0
+
     # Check admin
     if not is_admin():
         request_elevation()
@@ -100,6 +145,35 @@ def main() -> int:
         proceed = console.input("[yellow]Continue anyway? (y/n): [/]").strip().lower()
         if proceed not in ("y", "yes"):
             return 1
+
+    # -- DRY-RUN banner --
+    if args.dry_run:
+        console.print(Panel(
+            "[bold yellow]DRY-RUN MODE[/] — No files will be deleted.",
+            border_style="yellow",
+        ))
+
+    # -- PROFILE handling --
+    profile_rules = None
+    if args.profile:
+        from config import BUILTIN_PROFILES
+        profile = BUILTIN_PROFILES.get(args.profile.lower())
+        if not profile:
+            console.print(f"[red]Unknown profile '{args.profile}'. "
+                          f"Use --list-profiles to see options.[/]")
+            return 1
+        profile_rules = set(profile.rules)
+        console.print(f"[cyan]Using profile: [bold]{profile.name}[/] — {profile.description}[/]")
+        # If profile includes registry, auto-enable it
+        if "registry" in profile_rules:
+            args.include_registry = True
+
+    # -- EXCLUSIONS --
+    from config import load_exclusions, is_excluded, ExclusionConfig
+    exclusions = load_exclusions()
+    # Add CLI-provided exclusions
+    for excl_path in args.exclude:
+        exclusions.paths.add(os.path.abspath(excl_path))
 
     console.print("[bold]Starting deep system scan...[/]\n")
 
@@ -114,7 +188,7 @@ def main() -> int:
         TextColumn("[cyan]({task.completed}/{task.total})[/]"),
         console=console,
     ) as progress:
-        task = progress.add_task("Initializing...", total=9)
+        task = progress.add_task("Initializing...", total=100)
 
         def on_progress(name: str, current: int, total: int):
             if total > 0:
@@ -124,8 +198,12 @@ def main() -> int:
         result = scan_all(
             include_registry=args.include_registry,
             progress_cb=on_progress,
+            profile_rules=profile_rules,
         )
         progress.update(task, description="Done!")
+
+    # -- POST-SCAN FILTERING --
+    _apply_filters(result, args, exclusions)
 
     # Import UI functions
     from ui import (
@@ -143,10 +221,13 @@ def main() -> int:
         console.print("[green]Your system is already clean! No items found to delete.[/]")
         return 0
 
-    # -- SCAN-ONLY MODE --
-    if args.scan_only:
+    # -- SCAN-ONLY or DRY-RUN MODE --
+    if args.scan_only or args.dry_run:
         _show_detailed_scan(result)
-        console.print("[dim]Scan-only mode. No files were deleted.[/]")
+        if args.dry_run:
+            console.print("[yellow]Dry-run mode. No files were deleted.[/]")
+        else:
+            console.print("[dim]Scan-only mode. No files were deleted.[/]")
         return 0
 
     # -- AUTO MODE --
@@ -193,6 +274,38 @@ def main() -> int:
             )
 
         return 0
+
+
+def _apply_filters(result, args, exclusions) -> None:
+    """Apply age-based filtering and exclusion rules to scan results."""
+    import time as _time
+    from config import is_excluded
+
+    min_age_seconds = args.min_age * 86400 if args.min_age > 0 else 0
+    cutoff = _time.time() - min_age_seconds if min_age_seconds > 0 else 0
+
+    for cat in result.categories:
+        if not cat.items:
+            continue
+
+        filtered = []
+        for item in cat.items:
+            # Check exclusions
+            if is_excluded(item.path, exclusions):
+                continue
+
+            # Check age filter (only for files/directories, not registry)
+            if cutoff > 0 and item.item_type.value != "registry_key":
+                try:
+                    mtime = os.path.getmtime(item.path)
+                    if mtime >= cutoff:
+                        continue  # Too new, skip
+                except (OSError, PermissionError):
+                    pass  # Can't stat — keep it in the list
+
+            filtered.append(item)
+
+        cat.items = filtered
 
 
 def _show_detailed_scan(result) -> None:

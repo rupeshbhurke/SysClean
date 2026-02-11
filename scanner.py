@@ -44,6 +44,7 @@ def get_file_size(path: str) -> int:
 def scan_all(
     include_registry: bool = False,
     progress_cb: ProgressCallback = None,
+    profile_rules: Optional[set] = None,
 ) -> ScanResult:
     """
     Run all enabled cleanup rules and return aggregated results.
@@ -51,12 +52,18 @@ def scan_all(
     Args:
         include_registry: If True, include registry analysis rules.
         progress_cb: Optional callback for progress reporting.
+        profile_rules: If provided, only run rules whose `name` is in this set.
 
     Returns:
         ScanResult with all discovered cleanup items grouped by category.
     """
     result = ScanResult()
-    rules = [r for r in ALL_RULES if include_registry or r.name != "registry"]
+
+    if profile_rules is not None:
+        rules = [r for r in ALL_RULES if r.name in profile_rules]
+    else:
+        rules = [r for r in ALL_RULES if include_registry or r.name != "registry"]
+
     total = len(rules)
 
     for idx, rule_module in enumerate(rules):
